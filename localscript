@@ -1,0 +1,229 @@
+-- building system with CORNER snap 
+-- LocalScript in StarterPlayerScripts
+-- needs 3 parts in ReplicatedStorage: "Block", "WallBlock", "FloorBlock"
+-- parts should be Anchored true, CanCollide true
+
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+
+-- templates
+local blockTemplates = {
+	ReplicatedStorage:WaitForChild("Block"),
+	ReplicatedStorage:WaitForChild("WallBlock"),
+	ReplicatedStorage:WaitForChild("FloorBlock")
+}
+local currentTemplateIndex = 1
+local blockTemplate = blockTemplates[currentTemplateIndex]
+
+-- one global grid size
+local GRID_SIZE = 4
+
+-- placement vars
+local currentRotation = 0
+local ghostPart
+local placedBlocks = {}
+
+-- snap raw mouse pos to grid
+local function snapBase(position)
+	return Vector3.new(
+		math.floor(position.X / GRID_SIZE + 0.5) * GRID_SIZE,
+		math.floor(position.Y / GRID_SIZE + 0.5) * GRID_SIZE,
+		math.floor(position.Z / GRID_SIZE + 0.5) * GRID_SIZE
+	)
+end
+
+-- corner snap logic
+local function getCornerOffset(size, rotation)
+	local half = size / 2
+	rotation = rotation % 360
+	if rotation == 0 then
+		return Vector3.new(half.X, half.Y, half.Z)
+	elseif rotation == 90 then
+		return Vector3.new(-half.Z, half.Y, half.X)
+	elseif rotation == 180 then
+		return Vector3.new(-half.X, half.Y, -half.Z)
+	elseif rotation == 270 then
+		return Vector3.new(half.Z, half.Y, -half.X)
+	end
+	return Vector3.new(0, half.Y, 0)
+end
+
+-- make ghost
+local function makeGhost()
+	if ghostPart then ghostPart:Destroy() end
+	ghostPart = blockTemplate:Clone()
+	ghostPart.Transparency = 0.5
+	ghostPart.CanCollide = false
+	ghostPart.Anchored = true
+	ghostPart.Name = "GhostPart"
+	ghostPart.Parent = workspace
+end
+
+-- update ghost pos
+local function updateGhost()
+	if ghostPart and mouse.Hit then
+		local basePos = snapBase(mouse.Hit.Position)
+		local offset = getCornerOffset(blockTemplate.Size, currentRotation)
+		local finalPos = basePos + offset
+		ghostPart.CFrame = CFrame.new(finalPos) * CFrame.Angles(0, math.rad(currentRotation), 0)
+	end
+end
+
+-- overlap check (axis aligned box)
+local function canPlaceAt(cframe)
+	local newSize = blockTemplate.Size
+	local newPos = cframe.Position
+	local newName = blockTemplate.Name
+	local tolerance = 0.05
+
+	for _, part in ipairs(workspace:GetChildren()) do
+		if part:IsA("BasePart") and part:GetAttribute("PlacedBlock") then
+			local size = part.Size
+			local pos = part.Position
+			local partName = part.Name
+
+			-- walls ignore everything except other walls
+			if newName == "WallBlock" and partName ~= "WallBlock" then
+				continue
+			end
+			if partName == "WallBlock" and newName ~= "WallBlock" then
+				continue
+			end
+
+			-- AABB overlap check
+			local overlapX = math.abs(newPos.X - pos.X) < (newSize.X/2 + size.X/2 - tolerance)
+			local overlapY = math.abs(newPos.Y - pos.Y) < (newSize.Y/2 + size.Y/2 - tolerance)
+			local overlapZ = math.abs(newPos.Z - pos.Z) < (newSize.Z/2 + size.Z/2 - tolerance)
+
+			if overlapX and overlapY and overlapZ then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+
+
+
+-- place block
+local function placeBlock()
+	if ghostPart then
+		local cframe = ghostPart.CFrame
+		if canPlaceAt(cframe) then
+			local newBlock = blockTemplate:Clone()
+			newBlock.CFrame = cframe
+			newBlock.Anchored = true
+			newBlock.Parent = workspace
+			newBlock:SetAttribute("PlacedBlock", true)
+			table.insert(placedBlocks, {
+				name = blockTemplate.Name,
+				pos = {cframe.Position.X, cframe.Position.Y, cframe.Position.Z},
+				rot = currentRotation
+			})
+		else
+			warn("cant place, overlap detected")
+		end
+	end
+end
+
+-- cycle block
+local function cycleBlock(next)
+	if next then
+		currentTemplateIndex += 1
+		if currentTemplateIndex > #blockTemplates then
+			currentTemplateIndex = 1
+		end
+	else
+		currentTemplateIndex -= 1
+		if currentTemplateIndex < 1 then
+			currentTemplateIndex = #blockTemplates
+		end
+	end
+	blockTemplate = blockTemplates[currentTemplateIndex]
+	makeGhost()
+	updateGhost()
+end
+
+-- save build (fake, console)
+local function saveBuild()
+	local data = HttpService:JSONEncode(placedBlocks)
+	print("Saving build:", data)
+end
+
+-- load build (fake, json string)
+local function loadBuild(dataString)
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(dataString)
+	end)
+	if ok then
+		for _, part in ipairs(workspace:GetChildren()) do
+			if part:GetAttribute("PlacedBlock") then
+				part:Destroy()
+			end
+		end
+		placedBlocks = {}
+		for _, info in ipairs(data) do
+			local template = ReplicatedStorage:FindFirstChild(info.name)
+			if template then
+				local newBlock = template:Clone()
+				newBlock.CFrame = CFrame.new(Vector3.new(info.pos[1], info.pos[2], info.pos[3]))
+					* CFrame.Angles(0, math.rad(info.rot), 0)
+				newBlock.Anchored = true
+				newBlock.Parent = workspace
+				newBlock:SetAttribute("PlacedBlock", true)
+				table.insert(placedBlocks, info)
+			end
+		end
+	else
+		warn("load failed")
+	end
+end
+
+
+makeGhost()
+
+-- events
+mouse.Move:Connect(updateGhost)
+mouse.Button1Down:Connect(placeBlock)
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+	if gpe then return end
+	if input.KeyCode == Enum.KeyCode.Q then
+		currentRotation = (currentRotation - 90) % 360
+		updateGhost()
+	elseif input.KeyCode == Enum.KeyCode.E then
+		currentRotation = (currentRotation + 90) % 360
+		updateGhost()
+	elseif input.KeyCode == Enum.KeyCode.One then
+		cycleBlock(true)
+	elseif input.KeyCode == Enum.KeyCode.Two then
+		cycleBlock(false)
+	elseif input.KeyCode == Enum.KeyCode.F5 then
+		saveBuild()
+	elseif input.KeyCode == Enum.KeyCode.F6 then
+		local fake = HttpService:JSONEncode(placedBlocks)
+		loadBuild(fake)
+	elseif input.KeyCode == Enum.KeyCode.Delete then
+		for _, part in ipairs(workspace:GetChildren()) do
+			if part:GetAttribute("PlacedBlock") then
+				part:Destroy()
+			end
+		end
+		placedBlocks = {}
+	end
+end)
+
+-- keep ghost synced
+RunService.RenderStepped:Connect(updateGhost)
+
+-- features:
+-- - corner snapping to global grid
+-- - rotate with Q/E (corner offset follows rotation)
+-- -
