@@ -1,0 +1,109 @@
+--// Multiplayer Build System (Server)
+--// Server is authority: validates placement, spawns blocks, handles deletes.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+-- setup remotes
+local RemotesFolder = ReplicatedStorage:FindFirstChild("BuildRemotes") or Instance.new("Folder")
+RemotesFolder.Name = "BuildRemotes"
+RemotesFolder.Parent = ReplicatedStorage
+
+local REQ_Place = Instance.new("RemoteEvent")
+REQ_Place.Name = "PlaceRequest"
+REQ_Place.Parent = RemotesFolder
+
+local REQ_Delete = Instance.new("RemoteEvent")
+REQ_Delete.Name = "DeleteRequest"
+REQ_Delete.Parent = RemotesFolder
+
+local EVT_Error = Instance.new("RemoteEvent")
+EVT_Error.Name = "ClientError"
+EVT_Error.Parent = RemotesFolder
+
+-- allowed templates
+local ALLOWED_TEMPLATES = {
+	Block = ReplicatedStorage:WaitForChild("Block"),
+	WallBlock = ReplicatedStorage:WaitForChild("WallBlock"),
+	FloorBlock = ReplicatedStorage:WaitForChild("FloorBlock"),
+}
+
+-- track placed blocks
+local BlocksById = {}
+
+local function newId()
+	return HttpService:GenerateGUID(false)
+end
+
+-- snap to grid
+local function snapBase(v3: Vector3, grid: number, enabled: boolean): Vector3
+	if not enabled then return v3 end
+	return Vector3.new(
+		math.floor(v3.X / grid + 0.5) * grid,
+		math.floor(v3.Y / grid + 0.5) * grid,
+		math.floor(v3.Z / grid + 0.5) * grid
+	)
+end
+
+-- collision check
+local function canPlace(template: BasePart, cframe: CFrame): boolean
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {}
+
+	-- tiny tolerance so touching faces are fine
+	local tolerance = Vector3.new(0.05, 0.05, 0.05)
+	local touching = workspace:GetPartBoundsInBox(cframe, template.Size - tolerance, params)
+	for _, part in ipairs(touching) do
+		if part:IsA("BasePart") and part:GetAttribute("PlacedBlock") then
+			return false
+		end
+	end
+	return true
+end
+
+
+local function sendError(player, msg)
+	EVT_Error:FireClient(player, msg)
+end
+
+REQ_Place.OnServerEvent:Connect(function(player, payload)
+	if type(payload) ~= "table" then return end
+
+	local templateName = payload.templateName
+	local rotationDeg = tonumber(payload.rotationDeg) or 0
+	local gridSize = tonumber(payload.gridSize) or 4
+	local snap = payload.snap == true
+	local worldCFrame = typeof(payload.worldCFrame) == "CFrame" and payload.worldCFrame or CFrame.new()
+
+	local template = ALLOWED_TEMPLATES[templateName]
+	if not template then
+		return sendError(player, "Invalid block type.")
+	end
+
+	-- calculate final pos (center snap only)
+	local basePos = snapBase(worldCFrame.Position, gridSize, snap)
+	local finalCF = CFrame.new(basePos) * CFrame.Angles(0, math.rad(rotationDeg), 0)
+
+	if not canPlace(template, finalCF) then
+		return sendError(player, "Can't place here, space taken.")
+	end
+
+	local id = newId()
+	local part = template:Clone()
+	part.CFrame = finalCF
+	part.Anchored = true
+	part:SetAttribute("PlacedBlock", true)
+	part:SetAttribute("BlockId", id)
+	part.Parent = workspace
+
+	BlocksById[id] = part
+end)
+
+REQ_Delete.OnServerEvent:Connect(function(player, blockId)
+	if type(blockId) ~= "string" then return end
+	local part = BlocksById[blockId]
+	if not part or not part.Parent then return end
+	BlocksById[blockId] = nil
+	part:Destroy()
+end)
